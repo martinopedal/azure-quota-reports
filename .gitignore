@@ -1,0 +1,17 @@
+# Output files
+*.csv
+
+# PowerShell
+*.ps1xml
+*.psm1.bak
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
