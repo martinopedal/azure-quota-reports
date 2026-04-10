@@ -1,4 +1,5 @@
 #!/usr/bin/env pwsh
+#Requires -Version 7.0
 <#
 .SYNOPSIS
     Fetches Azure compute and network quotas across subscriptions and locations.
@@ -7,6 +8,7 @@
     Iterates Azure subscriptions and locations, collects VM (compute) and network
     quota/usage data via Azure CLI, and exports results to CSV.
     Supports interactive login, service principal, and managed identity authentication.
+    Runs on Windows, macOS, and Linux with PowerShell 7+.
 
 .PARAMETER Locations
     Azure regions to query. Defaults to 'norwayeast'.
@@ -23,6 +25,14 @@
 
 .PARAMETER OnlyUsed
     Only include quotas where current usage is greater than zero.
+
+.PARAMETER Quiet
+    Suppress terminal table output and informational log messages.
+    CSV export and pipeline object output still occur. Warnings and errors are not suppressed.
+
+.PARAMETER HighUsageThreshold
+    Usage percentage threshold for the high-usage warning summary. Defaults to 80.
+    Set to 0 to disable the high-usage summary.
 
 .PARAMETER AuthMode
     Authentication method:
@@ -44,10 +54,19 @@
 .EXAMPLE
     .\Get-AzureQuotas.ps1
     # Uses current session, queries norwayeast across all enabled subscriptions.
+    # Displays results in terminal and exports to CSV.
 
 .EXAMPLE
     .\Get-AzureQuotas.ps1 -Locations norwayeast,westeurope,swedencentral -OnlyUsed
     # Queries three regions, only exports quotas with usage > 0.
+
+.EXAMPLE
+    .\Get-AzureQuotas.ps1 | Where-Object { $_.UsagePercent -gt 90 }
+    # Pipe quota objects for downstream filtering.
+
+.EXAMPLE
+    .\Get-AzureQuotas.ps1 -Quiet
+    # CSV export only, no terminal output. Objects still emitted to pipeline.
 
 .EXAMPLE
     .\Get-AzureQuotas.ps1 -AuthMode Interactive -AllLocations
@@ -75,6 +94,11 @@ param(
 
     [switch]$OnlyUsed,
 
+    [switch]$Quiet,
+
+    [ValidateRange(0, 100)]
+    [int]$HighUsageThreshold = 80,
+
     [ValidateSet('CurrentSession', 'Interactive', 'ServicePrincipal', 'ManagedIdentity')]
     [string]$AuthMode = 'CurrentSession',
 
@@ -86,6 +110,36 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+#region Prerequisites
+
+# Detect platform
+$isWindows = $IsWindows -or ($env:OS -eq 'Windows_NT')
+$isMacOS   = $IsMacOS
+$isLinux   = $IsLinux
+
+# Check Azure CLI
+if (-not (Get-Command 'az' -ErrorAction SilentlyContinue)) {
+    Write-Error 'Azure CLI (az) is not installed or not found on PATH.'
+    Write-Host ''
+    Write-Host 'Install Azure CLI for your platform:' -ForegroundColor Yellow
+    if ($isWindows) {
+        Write-Host '  winget install Microsoft.AzureCLI' -ForegroundColor Cyan
+        Write-Host '  or download from https://aka.ms/installazurecli' -ForegroundColor Cyan
+    } elseif ($isMacOS) {
+        Write-Host '  brew install azure-cli' -ForegroundColor Cyan
+    } elseif ($isLinux) {
+        Write-Host '  curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash   (Debian/Ubuntu)' -ForegroundColor Cyan
+        Write-Host '  sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc && sudo dnf install azure-cli   (Fedora/RHEL)' -ForegroundColor Cyan
+    } else {
+        Write-Host '  See https://aka.ms/installazurecli' -ForegroundColor Cyan
+    }
+    Write-Host ''
+    Write-Host 'After installing, restart your terminal and run this script again.' -ForegroundColor Yellow
+    exit 1
+}
+
+#endregion Prerequisites
+
 #region Helpers
 
 function Write-Log {
@@ -94,6 +148,7 @@ function Write-Log {
         [ValidateSet('Info','Warn','Error','Success')]
         [string]$Level = 'Info'
     )
+    if ($script:Quiet -and $Level -in @('Info', 'Success')) { return }
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $formatted = "[$ts] $($Level.ToUpper().PadRight(7)) $Message"
     switch ($Level) {
@@ -513,31 +568,95 @@ foreach ($sub in $subscriptions) {
 #region Export
 
 if ($allResults.Count -gt 0) {
-    $allResults | Export-Csv -Path $OutputFile -NoTypeInformation -Encoding utf8BOM
+    $allResults | Export-Csv -Path $OutputFile -NoTypeInformation -Encoding utf8
     Write-Log "Exported $($allResults.Count) quota records to: $OutputFile" -Level Success
 } else {
     Write-Log 'No quota data was collected.' -Level Warn
 }
 
 if ($allErrors.Count -gt 0) {
-    $allErrors | Export-Csv -Path $errorFile -NoTypeInformation -Encoding utf8BOM
+    $allErrors | Export-Csv -Path $errorFile -NoTypeInformation -Encoding utf8
     Write-Log "Logged $($allErrors.Count) failed queries to: $errorFile" -Level Warn
 }
 
 #endregion Export
 
-#region Summary
+#region Terminal output
 
-Write-Information '' -InformationAction Continue
-Write-Log '========== SUMMARY =========='
-Write-Log "Scan mode             : $scanMode"
-Write-Log "Subscriptions scanned : $($subscriptions.Count)"
-Write-Log "Total quota records   : $($allResults.Count)"
-Write-Log "Failed queries        : $($allErrors.Count)"
-Write-Log "Output                : $OutputFile"
-if ($allErrors.Count -gt 0) {
-    Write-Log "Error log             : $errorFile"
+if (-not $Quiet -and $allResults.Count -gt 0) {
+
+    # High-usage warning summary
+    if ($HighUsageThreshold -gt 0) {
+        $highUsage = $allResults |
+            Where-Object { $_.Limit -gt 0 -and $_.UsagePercent -ge $HighUsageThreshold } |
+            Sort-Object UsagePercent -Descending
+        if ($highUsage.Count -gt 0) {
+            $displayCount = [Math]::Min($highUsage.Count, 25)
+            Write-Warning "HIGH USAGE: $($highUsage.Count) quota(s) at or above $HighUsageThreshold% usage (showing top $displayCount)"
+            $highUsage |
+                Select-Object -First $displayCount |
+                Format-Table @(
+                    @{ Label = 'Subscription'; Expression = { $_.SubscriptionName } }
+                    @{ Label = 'Location';     Expression = { $_.Location } }
+                    @{ Label = 'Quota';        Expression = { $_.QuotaName } }
+                    @{ Label = 'Usage';        Expression = { "$($_.CurrentUsage)/$($_.Limit)" } }
+                    @{ Label = 'Pct';          Expression = { "$($_.UsagePercent)%" }; Alignment = 'Right' }
+                ) -AutoSize |
+                Out-Host
+        }
+    }
+
+    # Full results table (capped to avoid flooding the terminal)
+    $maxDisplay = 200
+    $sorted = $allResults | Sort-Object UsagePercent -Descending
+    if ($allResults.Count -le $maxDisplay) {
+        $sorted |
+            Format-Table @(
+                @{ Label = 'Subscription'; Expression = { $_.SubscriptionName } }
+                @{ Label = 'Location';     Expression = { $_.Location } }
+                @{ Label = 'Provider';     Expression = { $_.Provider } }
+                @{ Label = 'Quota';        Expression = { $_.QuotaName } }
+                @{ Label = 'Usage';        Expression = { $_.CurrentUsage }; Alignment = 'Right' }
+                @{ Label = 'Limit';        Expression = { $_.Limit }; Alignment = 'Right' }
+                @{ Label = 'Pct';          Expression = { "$($_.UsagePercent)%" }; Alignment = 'Right' }
+            ) -AutoSize |
+            Out-Host
+    } else {
+        Write-Log "Showing top $maxDisplay of $($allResults.Count) records (sorted by usage). Full data in CSV." -Level Info
+        $sorted |
+            Select-Object -First $maxDisplay |
+            Format-Table @(
+                @{ Label = 'Subscription'; Expression = { $_.SubscriptionName } }
+                @{ Label = 'Location';     Expression = { $_.Location } }
+                @{ Label = 'Provider';     Expression = { $_.Provider } }
+                @{ Label = 'Quota';        Expression = { $_.QuotaName } }
+                @{ Label = 'Usage';        Expression = { $_.CurrentUsage }; Alignment = 'Right' }
+                @{ Label = 'Limit';        Expression = { $_.Limit }; Alignment = 'Right' }
+                @{ Label = 'Pct';          Expression = { "$($_.UsagePercent)%" }; Alignment = 'Right' }
+            ) -AutoSize |
+            Out-Host
+    }
 }
-Write-Log 'Done.' -Level Success
 
-#endregion Summary
+#endregion Terminal output
+
+#region Summary and pipeline output
+
+if (-not $Quiet) {
+    Write-Information '' -InformationAction Continue
+    Write-Log '========== SUMMARY =========='
+    Write-Log "Scan mode             : $scanMode"
+    Write-Log "Subscriptions scanned : $($subscriptions.Count)"
+    Write-Log "Total quota records   : $($allResults.Count)"
+    Write-Log "Failed queries        : $($allErrors.Count)"
+    Write-Log "Output                : $OutputFile"
+    if ($allErrors.Count -gt 0) {
+        Write-Log "Error log             : $errorFile"
+    }
+    Write-Log 'Done.' -Level Success
+}
+
+# Emit raw objects to the pipeline for downstream consumption
+$allResults
+
+#endregion Summary and pipeline output
