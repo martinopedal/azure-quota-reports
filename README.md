@@ -1,6 +1,8 @@
 # Azure Quota Reports
 
-PowerShell script that collects Azure compute and network quota usage across all subscriptions and exports the results to CSV. Also displays results in the terminal with high-usage warnings.
+Azure has no built-in way to see quota usage across all your subscriptions in one place. The portal shows one subscription at a time, and `az vm list-usage` only covers a single region. If you manage multiple subscriptions, spotting a quota that is about to block a deployment means clicking through dozens of pages or writing your own wrapper.
+
+This script does that for you. It queries compute and network quota usage across all your subscriptions, exports the results to CSV, and flags quotas approaching their limits in the terminal.
 
 ## Requirements
 
@@ -150,6 +152,16 @@ The script also emits quota objects to the pipeline, so you can pipe results int
 | UsagePercent | Usage as a percentage of the limit |
 | Source | Azure CLI command used to collect the data |
 | Status | Success or error indicator |
+
+### Sample CSV output
+
+```
+SubscriptionName,SubscriptionId,Location,Provider,QuotaName,QuotaId,CurrentUsage,Limit,Unit,UsagePercent,Source,Status
+prod-web,aaaa-1111-2222-3333,norwayeast,Microsoft.Compute,Total Regional vCPUs,cores,88,100,Count,88.00,az vm list-usage,Success
+prod-web,aaaa-1111-2222-3333,norwayeast,Microsoft.Compute,Standard Dv3 Family vCPUs,standardDv3Family,64,100,Count,64.00,az vm list-usage,Success
+dev-sandbox,bbbb-4444-5555-6666,norwayeast,Microsoft.Network,Load Balancers,LoadBalancers,2,250,Count,0.80,az network list-usages,Success
+dev-sandbox,bbbb-4444-5555-6666,westeurope,Microsoft.Compute,Total Regional vCPUs,cores,0,10,Count,0.00,az vm list-usage,Success
+```
 
 ### Error CSV
 
