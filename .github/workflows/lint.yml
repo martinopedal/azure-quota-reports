@@ -7,13 +7,30 @@ on:
     branches: [main]
 
 permissions:
+  actions: read
   contents: read
   security-events: write
 
 jobs:
+  # Preflight: probe Pool P1 (self-hosted, personal) for online runners.
+  # Returns ["self-hosted","personal"] when available; otherwise ["ubuntu-latest"].
+  # See martinopedal/personal-runners-infra (.github/workflows/runner-preflight.yml).
+  preflight:
+    uses: martinopedal/personal-runners-infra/.github/workflows/runner-preflight.yml@main
+    with:
+      desired_label: personal
+      os: linux
+      min_online: 1
+    permissions:
+      actions: read
+      contents: read
+    secrets:
+      PREFLIGHT_TOKEN: ${{ secrets.PREFLIGHT_TOKEN }}
+
   lint:
     name: Lint PowerShell
-    runs-on: [self-hosted, personal, linux, x64]
+    needs: preflight
+    runs-on: ${{ fromJSON(needs.preflight.outputs.runner_label) }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
